@@ -1,44 +1,38 @@
-import time
 import logging
 import telegram
-from telegram.error import TelegramError, NetworkError, TimedOut
-
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 
 class TelegramBot:
-    def __init__(self, token, chat_id, logger=None):
+    def __init__(self, token, chat_id, logger: logging.Logger):
         self.token = token
-        self.chat_id = chat_id
-        self.logger = logger or logging.getLogger(__name__)
-        self.bot = telegram.Bot(token=self.token)
+        self.chat_id = str(chat_id)
+        self.logger = logger
+        self.updater = Updater(token=self.token, use_context=True)
+        self.dispatcher = self.updater.dispatcher
 
     def start_polling(self, command_queue):
-        self.logger.info("Telegram bot polling started.")
-        offset = None
-        while True:
-            try:
-                updates = self.bot.get_updates(offset=offset, timeout=30)
-                for update in updates:
-                    offset = update.update_id + 1
-                    if update.message and update.message.chat.id == int(self.chat_id):
-                        text = update.message.text
-                        if text:  # Check if text exists
-                            self.logger.info(f"Received telegram command: {text}")
-                            command_queue.put(text.lower())
-            except (NetworkError, TimedOut) as e:
-                self.logger.warning(f"Telegram network error: {e}")
-                time.sleep(5)
-            except TelegramError as e:
-                self.logger.error(f"Telegram API error: {e}")
-                time.sleep(5)
-            except Exception as e:
-                self.logger.error(f"Telegram polling error: {e}")
-                time.sleep(5)
+        self.dispatcher.add_handler(CommandHandler("start", lambda update, ctx: command_queue.put("/start")))
+        self.dispatcher.add_handler(CommandHandler("stop", lambda update, ctx: command_queue.put("/stop")))
+        self.dispatcher.add_handler(CommandHandler("status", lambda update, ctx: command_queue.put("/status")))
+        self.dispatcher.add_handler(CommandHandler("daily", lambda update, ctx: command_queue.put("/daily")))
+        self.dispatcher.add_handler(CommandHandler("weekly", lambda update, ctx: command_queue.put("/weekly")))
+        self.dispatcher.add_handler(CommandHandler("maketrade", lambda update, ctx: command_queue.put("/maketrade")))
+        self.dispatcher.add_handler(CommandHandler("diagnostics", lambda update, ctx: command_queue.put("/diagnostics")))
+        self.dispatcher.add_handler(CommandHandler("help", lambda update, ctx: command_queue.put("/help")))
+        self.dispatcher.add_handler(CommandHandler("whatyoudoin", lambda update, ctx: command_queue.put("/whatyoudoin")))
 
-    def send_message(self, text):
+        self.dispatcher.add_handler(MessageHandler(Filters.text, self.unknown_message))
+
+        self.updater.start_polling()
+        self.logger.info("✅ Telegram bot polling started")
+
+    def unknown_message(self, update, context):
+        self.send_message("❓ I didn't understand that. Use /help for available commands.")
+
+    def send_message(self, message: str):
         try:
-            self.bot.send_message(chat_id=self.chat_id, text=text)
-            self.logger.info(f"Sent message: {text}")
-        except TelegramError as e:
-            self.logger.error(f"Failed to send telegram message: {e}")
+            bot = telegram.Bot(token=self.token)
+            bot.send_message(chat_id=self.chat_id, text=message)
+            self.logger.info(f"Sent message: {message}")
         except Exception as e:
-            self.logger.error(f"Unexpected error sending message: {e}")
+            self.logger.error(f"❌ Failed to send Telegram message: {e}")

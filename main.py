@@ -5,19 +5,14 @@ import time
 import signal
 import asyncio
 import logging
-import threading
+from threading import Thread
 from queue import Queue
 from datetime import datetime
 
-import telegram
 from oandapyV20 import API
-from oandapyV20.endpoints.pricing import Pricing
-from oandapyV20.endpoints.orders import OrderCreate
-from oandapyV20.endpoints.accounts import AccountDetails
-
-from trader import Trader  # We'll assume this is your trading logic class
-from scraper import MarketSentimentScraper  # Your scraper, async
-from bot import TelegramBot  # Telegram wrapper you wrote
+from trader import Trader
+from scraper import MarketSentimentScraper
+from bot import TelegramBot
 
 # --- Setup logging ---
 LOG_PATH = "logs/trading_bot.log"
@@ -32,258 +27,161 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
-# --- Load env ---
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    logger.warning("python-dotenv not found. Loading env variables from system.")
-
-# --- Required environment variables ---
+# --- Load ENV manually ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 OANDA_API_KEY = os.getenv("OANDA_API_KEY")
 OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
+HF_API_KEY = os.getenv("HF_API_KEY")
 
-if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, OANDA_API_KEY, OANDA_ACCOUNT_ID]):
-    logger.error("Missing one or more required environment variables: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, OANDA_API_KEY, OANDA_ACCOUNT_ID")
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, OANDA_API_KEY, OANDA_ACCOUNT_ID, HF_API_KEY]):
+    logger.error("❌ Missing critical environment variables.")
     sys.exit(1)
 
-MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_DAILY_LOSS_PERCENT", "20"))
-MAX_CAPITAL_LOSS_PERCENT = 70  # hard stop at 70% loss
-SCAN_INTERVAL = float(os.getenv("SCAN_INTERVAL", "30"))
-
+# Constants
 STATE_FILE = "data/state.json"
 os.makedirs("data", exist_ok=True)
 
-state_lock = threading.Lock()
+# Setup
+state = {
+    "running": False,
+    "daily_pnl": 0.0,
+    "weekly_pnl": 0.0,
+    "capital": 10000.0,
+    "open_trades": [],
+    "last_reset": datetime.now().isoformat()
+}
 
-class StateManager:
-    def __init__(self, filepath):
-        self.filepath = filepath
-        self.state = {
-            "running": False,
-            "daily_profit_loss": 0.0,
-            "weekly_profit_loss": 0.0,
-            "total_capital": 10000.0,
-            "last_trade": None,
-            "trades": [],
-            "recovery_mode": False,
-            "last_reset": datetime.now().isoformat(),
-        }
-        self.load()
+# Save state
+def save_state():
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
 
-    def load(self):
-        with state_lock:
-            try:
-                with open(self.filepath, "r") as f:
-                    loaded = json.load(f)
-                    self.state.update(loaded)
-                    logger.info("Loaded state from file.")
-            except FileNotFoundError:
-                logger.info("No existing state file. Starting fresh.")
-                self.save()
-            except Exception as e:
-                logger.error(f"Error loading state file: {e}")
-                self.save()
+# Load state
+def load_state():
+    try:
+        with open(STATE_FILE, "r") as f:
+            state.update(json.load(f))
+    except:
+        save_state()
 
-    def save(self):
-        with state_lock:
-            try:
-                with open(self.filepath, "w") as f:
-                    json.dump(self.state, f, indent=2)
-            except Exception as e:
-                logger.error(f"Error saving state file: {e}")
+load_state()
 
-    def reset_daily_stats(self):
-        with state_lock:
-            self.state["daily_profit_loss"] = 0.0
-            self.state["recovery_mode"] = False
-            self.state["last_reset"] = datetime.now().isoformat()
-            self.save()
-
-state_mgr = StateManager(STATE_FILE)
-
-# --- Initialize OANDA API ---
-try:
-    api = API(access_token=OANDA_API_KEY)
-    logger.info("OANDA API initialized.")
-except Exception as e:
-    logger.error(f"Failed to init OANDA API: {e}")
-    sys.exit(1)
-
-# --- Initialize Trader, Scraper, TelegramBot ---
-trader = Trader(api, OANDA_ACCOUNT_ID, state_mgr, logger)
-scraper = MarketSentimentScraper(logger)
-tg_bot = TelegramBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, logger)
-
+# --- Components ---
+api = API(access_token=OANDA_API_KEY)
+trader = Trader(api, OANDA_ACCOUNT_ID, state, logger)
+scraper = MarketSentimentScraper(logger, HF_API_KEY)
+bot = TelegramBot(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, logger)
 command_queue = Queue()
 
+# --- Telegram listener ---
 def telegram_listener():
     try:
-        tg_bot.start_polling(command_queue)
+        bot.start_polling(command_queue)
     except Exception as e:
-        logger.error(f"Telegram listener crashed: {e}")
+        logger.error(f"Telegram listener error: {e}")
 
+# --- Command handler ---
+def handle_telegram_commands():
+    while True:
+        cmd = command_queue.get()
+        logger.info(f"Processing command: {cmd}")
+        try:
+            if cmd == "/start":
+                if state["running"]:
+                    bot.send_message("🤖 Already running.")
+                else:
+                    state["running"] = True
+                    save_state()
+                    bot.send_message("✅ Bot started.")
+            elif cmd == "/stop":
+                state["running"] = False
+                save_state()
+                bot.send_message("🛑 Bot stopped.")
+            elif cmd == "/status":
+                summary = trader.status_summary(state)
+                bot.send_message(summary)
+            elif cmd == "/whatyoudoin":
+                report = trader.activity_report()
+                bot.send_message(report)
+            elif cmd == "/daily":
+                pnl = state["daily_pnl"]
+                expected = trader.estimate_daily_profit()
+                bot.send_message(f"📅 Today's P&L: £{pnl:.2f}\n📈 Expected EOD: £{expected:.2f}")
+            elif cmd == "/weekly":
+                pnl = state["weekly_pnl"]
+                expected = trader.estimate_weekly_profit()
+                bot.send_message(f"🗓 Weekly P&L: £{pnl:.2f}\n📈 Expected EOW: £{expected:.2f}")
+            elif cmd == "/maketrade":
+                report = asyncio.run(trader.force_trade())
+                bot.send_message(report)
+            elif cmd == "/help":
+                help_text = """
+📘 Commands:
+/start - Start bot
+/stop - Stop bot
+/status - Full system & trading status
+/whatyoudoin - Full activity report
+/maketrade - Force trade now
+/daily - Daily P&L
+/weekly - Weekly P&L
+/help - Show commands
+"""
+                bot.send_message(help_text)
+        except Exception as e:
+            logger.error(f"Command error: {e}")
+            bot.send_message(f"⚠️ Command error: {str(e)}")
+
+# --- Async trading loop ---
 async def trading_loop():
-    logger.info("Starting trading loop")
-    tg_bot.send_message("🤖 Trading bot started and ready.")
-
+    logger.info("📈 Starting trading loop")
+    bot.send_message("🤖 Trading bot started and ready.")
     while True:
         try:
-            if not state_mgr.state["running"]:
+            if not state["running"]:
                 await asyncio.sleep(5)
                 continue
 
+            # Reset daily P&L if new day
             now = datetime.now()
-            last_reset = datetime.fromisoformat(state_mgr.state.get("last_reset", now.isoformat()))
-            if now.date() > last_reset.date():
-                state_mgr.reset_daily_stats()
-                logger.info("Daily stats reset")
+            last = datetime.fromisoformat(state["last_reset"])
+            if now.date() > last.date():
+                state["daily_pnl"] = 0.0
+                state["last_reset"] = now.isoformat()
+                save_state()
 
-            sentiment = await scraper.fetch_latest_sentiment()
-            trade_report = await trader.analyze_and_trade(sentiment)
+            # Scrape sentiment
+            sentiment = await scraper.fetch()
 
-            if trade_report:
-                tg_bot.send_message(trade_report)
+            # Analyze + trade
+            report = await trader.analyze_and_trade(sentiment)
+            if report:
+                bot.send_message(report)
 
-            # Check risk limits
-            daily_loss_limit = MAX_DAILY_LOSS_PERCENT / 100 * state_mgr.state["total_capital"]
-            if state_mgr.state["daily_profit_loss"] <= -daily_loss_limit:
-                logger.warning(f"Daily loss limit reached: {state_mgr.state['daily_profit_loss']}")
-                with state_lock:
-                    state_mgr.state["running"] = False
-                    state_mgr.state["recovery_mode"] = True
-                    state_mgr.save()
-                tg_bot.send_message(f"🚫 Daily loss limit reached (£{state_mgr.state['daily_profit_loss']:.2f}). Bot stopped.")
-            
-            capital_loss_pct = (10000.0 - state_mgr.state["total_capital"]) / 10000.0 * 100
-            if capital_loss_pct >= MAX_CAPITAL_LOSS_PERCENT:
-                logger.error(f"Capital loss exceeded: {capital_loss_pct:.2f}%")
-                with state_lock:
-                    state_mgr.state["running"] = False
-                    state_mgr.save()
-                tg_bot.send_message(f"💀 Capital loss limit exceeded ({capital_loss_pct:.1f}%). Bot stopped permanently.")
-                sys.exit(1)
-
-            state_mgr.save()
-
+            save_state()
         except Exception as e:
-            import traceback
-            err = traceback.format_exc()
-            logger.error(f"Trading loop error: {err}")
-            tg_bot.send_message(f"⚠️ Trading loop error:\n{err}")
+            logger.error(f"❌ Loop error: {e}")
+            bot.send_message(f"⚠️ Loop error: {str(e)}")
+            await asyncio.sleep(10)
 
-        await asyncio.sleep(SCAN_INTERVAL)
+        await asyncio.sleep(20)
 
-def handle_telegram_commands():
-    while True:
-        try:
-            cmd = command_queue.get()
-            logger.info(f"Command received: {cmd}")
+# --- Graceful shutdown ---
+def shutdown(sig, frame):
+    logger.info("👋 Shutting down")
+    state["running"] = False
+    save_state()
+    bot.send_message("🛑 Bot shutting down.")
+    sys.exit(0)
 
-            if cmd == "/start":
-                with state_lock:
-                    if state_mgr.state["running"]:
-                        tg_bot.send_message("Bot already running.")
-                    else:
-                        state_mgr.state["running"] = True
-                        state_mgr.save()
-                        summary = trader.get_strategy_summary()
-                        tg_bot.send_message(f"✅ Bot started.\n{summary}")
-
-            elif cmd == "/stop":
-                with state_lock:
-                    if not state_mgr.state["running"]:
-                        tg_bot.send_message("Bot already stopped.")
-                    else:
-                        state_mgr.state["running"] = False
-                        state_mgr.save()
-                        tg_bot.send_message("🛑 Bot stopped.")
-
-            elif cmd == "/status":
-                with state_lock:
-                    status = "🟢 RUNNING" if state_mgr.state["running"] else "🔴 STOPPED"
-                    pnl = state_mgr.state["daily_profit_loss"]
-                    capital = state_mgr.state["total_capital"]
-                    recovery = "YES" if state_mgr.state["recovery_mode"] else "NO"
-                msg = f"📊 Status: {status}\n💰 Today's P&L: £{pnl:.2f}\n💼 Capital: £{capital:.2f}\n🔄 Recovery Mode: {recovery}"
-                tg_bot.send_message(msg)
-
-            elif cmd == "/maketrade":
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                trade_report = loop.run_until_complete(trader.force_trade())
-                tg_bot.send_message(trade_report)
-
-            elif cmd == "/diagnostics":
-                diag = trader.run_diagnostics()
-                tg_bot.send_message(f"🩺 Diagnostics:\n{diag}")
-
-            elif cmd == "/daily":
-                with state_lock:
-                    pnl = state_mgr.state["daily_profit_loss"]
-                expected = trader.estimate_daily_profit()
-                tg_bot.send_message(f"📅 Today's P&L: £{pnl:.2f}\nExpected EOD: £{expected:.2f}")
-
-            elif cmd == "/weekly":
-                with state_lock:
-                    pnl = state_mgr.state["weekly_profit_loss"]
-                expected = trader.estimate_weekly_profit()
-                tg_bot.send_message(f"🗓️ This week's P&L: £{pnl:.2f}\nExpected EOW: £{expected:.2f}")
-
-            elif cmd == "/help":
-                help_text = (
-                    "🤖 Available commands:\n"
-                    "/start - Start the bot\n"
-                    "/stop - Stop the bot\n"
-                    "/status - Show status\n"
-                    "/daily - Daily P&L\n"
-                    "/weekly - Weekly P&L\n"
-                    "/maketrade - Force trade\n"
-                    "/diagnostics - Run diagnostics\n"
-                    "/help - This message"
-                )
-                tg_bot.send_message(help_text)
-
-            else:
-                tg_bot.send_message("❓ Unknown command. Use /help.")
-
-        except Exception as e:
-            logger.error(f"Error processing command: {e}")
-            tg_bot.send_message(f"⚠️ Command processing error: {str(e)}")
-
-def shutdown_handler(sig, frame):
-    logger.info(f"Shutdown signal: {sig}")
-    with state_lock:
-        state_mgr.state["running"] = False
-        state_mgr.save()
-    tg_bot.send_message("🛑 Bot shutting down...")
-    time.sleep(2)
-    os._exit(0)
+signal.signal(signal.SIGINT, shutdown)
+signal.signal(signal.SIGTERM, shutdown)
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, shutdown_handler)
-    signal.signal(signal.SIGTERM, shutdown_handler)
+    tg_thread = Thread(target=telegram_listener, daemon=True)
+    tg_thread.start()
 
-    logger.info("Starting trading bot")
+    cmd_thread = Thread(target=handle_telegram_commands, daemon=True)
+    cmd_thread.start()
 
-    try:
-        tg_bot.send_message("🔧 System startup...")
-        trader.test_connection()
-        logger.info("System validated.")
-    except Exception as e:
-        logger.error(f"Startup validation failed: {e}")
-        sys.exit(1)
-
-    threading.Thread(target=telegram_listener, daemon=True).start()
-    threading.Thread(target=handle_telegram_commands, daemon=True).start()
-
-    try:
-        asyncio.run(trading_loop())
-    except KeyboardInterrupt:
-        shutdown_handler(signal.SIGINT, None)
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        tg_bot.send_message(f"💀 Fatal error: {str(e)}")
-        sys.exit(1)
+    asyncio.run(trading_loop())
