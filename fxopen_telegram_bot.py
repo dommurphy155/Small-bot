@@ -1,23 +1,19 @@
-import os
 import time
 import hmac
 import json
 import requests
 from hashlib import sha256
-from flask import Flask, request
 
-# Load from environment
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-API_BASE = os.getenv("FXOPEN_API_BASE")
-TOKEN_ID = os.getenv("FXOPEN_TOKEN_ID")
-TOKEN_KEY = os.getenv("FXOPEN_TOKEN_KEY")
-TOKEN_SECRET = os.getenv("FXOPEN_TOKEN_SECRET")
-PUBLIC_URL = os.getenv("PUBLIC_URL")
+# --- FXOpen Credentials ---
+TT_API_BASE = "https://ttdemowebapi.fxopen.net:8443"
+TOKEN_ID = "f1930d7f-bb11-45e9-a892-7b9e58113423"
+TOKEN_KEY = "fEYWr5E9BmgrC76k"
+TOKEN_SECRET = "ab6WXCsQfYn88YPn4Gq2gXDwPqzd9fWn7tcydNnwNfa9wBdsfxGfyT3mFHfFcnR9"
 
-WEBHOOK_FLAG_FILE = ".webhook_set"
-
-app = Flask(__name__)
+# --- Telegram Bot Credentials ---
+BOT_TOKEN = "7970729024:AAFIFzpY8-m2OLY07chzcYWJevgXXcTbZUs"
+CHAT_ID = "7108900627"
+TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 def hmac_headers(method, endpoint, body=""):
     timestamp = str(int(time.time() * 1000))
@@ -27,63 +23,53 @@ def hmac_headers(method, endpoint, body=""):
         "X-Auth-Apikey": TOKEN_ID,
         "X-Auth-Timestamp": timestamp,
         "X-Auth-Signature": signature,
-        "Content-Type": "application/json",
-        "Content-Length": str(len(body.encode()))
+        "Content-Type": "application/json"
     }
 
-def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": msg}
-    requests.post(url, json=payload)
+def send_telegram(text):
+    payload = {"chat_id": CHAT_ID, "text": text}
+    requests.post(f"{TG_API}/sendMessage", json=payload)
 
 def place_market_order(symbol="EURUSD", volume=10000, side="Buy"):
     endpoint = "/api/v2/Trade/MarketOrder"
-    url = API_BASE + endpoint
+    url = TT_API_BASE + endpoint
     order = {
         "Symbol": symbol,
         "Volume": volume,
         "Side": side,
         "Comment": "TelegramBotTrade"
     }
-    body = json.dumps(order)
-    headers = hmac_headers("POST", endpoint, body)
-    response = requests.post(url, headers=headers, data=body)
-
+    headers = hmac_headers("POST", endpoint, json.dumps(order))
+    response = requests.post(url, headers=headers, json=order)
     if response.status_code == 200:
         result = response.json()
-        return f"✅ Trade executed:\nSymbol: {symbol}\nSide: {side}\nVolume: {volume}\nOrder ID: {result.get('ID')}"
+        return f"✅ Trade executed:\n{symbol} {side} {volume}\nOrder ID: {result.get('ID')}"
     else:
-        return f"❌ Trade failed:\n{response.status_code} - {response.text}"
+        return f"❌ Trade failed:\n{response.text}"
 
-@app.route(f"/bot/{BOT_TOKEN}", methods=["POST"])
-def telegram_webhook():
-    data = request.get_json()
-    if not data or "message" not in data:
-        return "Ignored", 200
+def handle_command(text):
+    if text.lower().strip() == "/maketrade":
+        return place_market_order()
+    return "Unrecognized command."
 
-    text = data["message"].get("text", "").strip().lower()
-    if text == "/maketrade":
-        result = place_market_order()
-        send_telegram(result)
-
-    return "OK", 200
-
-def set_webhook():
-    if not os.path.exists(WEBHOOK_FLAG_FILE):
-        full_url = f"{PUBLIC_URL}/bot/{BOT_TOKEN}"
-        r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={full_url}")
-        if r.status_code == 200:
-            print("✅ Webhook set:", r.text)
-            open(WEBHOOK_FLAG_FILE, "w").close()
-        else:
-            print("❌ Failed to set webhook:", r.text)
-            exit(1)
+def start_polling():
+    print("🤖 Polling started.")
+    last_update = 0
+    while True:
+        try:
+            resp = requests.get(f"{TG_API}/getUpdates?offset={last_update + 1}", timeout=30)
+            data = resp.json()
+            for update in data.get("result", []):
+                last_update = update["update_id"]
+                message = update.get("message", {})
+                chat_id = str(message.get("chat", {}).get("id", ""))
+                text = message.get("text", "")
+                if chat_id == CHAT_ID:
+                    reply = handle_command(text)
+                    send_telegram(reply)
+        except Exception as e:
+            print(f"Error: {e}")
+        time.sleep(2)
 
 if __name__ == "__main__":
-    required = [BOT_TOKEN, CHAT_ID, TOKEN_ID, TOKEN_KEY, TOKEN_SECRET, API_BASE, PUBLIC_URL]
-    if not all(required):
-        print("❌ Missing environment variables. Export all required secrets.")
-        exit(1)
-
-    set_webhook()
-    app.run(host="0.0.0.0", port=8080)
+    start_polling()
