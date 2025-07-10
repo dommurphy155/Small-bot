@@ -4,7 +4,7 @@ import json
 import requests
 from hashlib import sha256
 
-# --- FXOpen Credentials ---
+# --- FXOpen API Credentials ---
 TT_API_BASE = "https://ttdemowebapi.fxopen.net:8443"
 TOKEN_ID = "f1930d7f-bb11-45e9-a892-7b9e58113423"
 TOKEN_KEY = "fEYWr5E9BmgrC76k"
