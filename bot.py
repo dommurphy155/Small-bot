@@ -1,6 +1,8 @@
 import time
 import logging
 import telegram
+from telegram.error import TelegramError, NetworkError, TimedOut
+
 
 class TelegramBot:
     def __init__(self, token, chat_id, logger=None):
@@ -19,8 +21,15 @@ class TelegramBot:
                     offset = update.update_id + 1
                     if update.message and update.message.chat.id == int(self.chat_id):
                         text = update.message.text
-                        self.logger.info(f"Received telegram command: {text}")
-                        command_queue.put(text.lower())
+                        if text:  # Check if text exists
+                            self.logger.info(f"Received telegram command: {text}")
+                            command_queue.put(text.lower())
+            except (NetworkError, TimedOut) as e:
+                self.logger.warning(f"Telegram network error: {e}")
+                time.sleep(5)
+            except TelegramError as e:
+                self.logger.error(f"Telegram API error: {e}")
+                time.sleep(5)
             except Exception as e:
                 self.logger.error(f"Telegram polling error: {e}")
                 time.sleep(5)
@@ -29,5 +38,7 @@ class TelegramBot:
         try:
             self.bot.send_message(chat_id=self.chat_id, text=text)
             self.logger.info(f"Sent message: {text}")
-        except Exception as e:
+        except TelegramError as e:
             self.logger.error(f"Failed to send telegram message: {e}")
+        except Exception as e:
+            self.logger.error(f"Unexpected error sending message: {e}")
