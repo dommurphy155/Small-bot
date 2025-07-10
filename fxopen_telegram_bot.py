@@ -2,17 +2,14 @@ import time
 import hmac
 import json
 import requests
+import os
 from hashlib import sha256
 
-# --- FXOpen API Credentials ---
-TT_API_BASE = "https://ttdemowebapi.fxopen.net:8443"
-TOKEN_ID = "f1930d7f-bb11-45e9-a892-7b9e58113423"
-TOKEN_KEY = "fEYWr5E9BmgrC76k"
-TOKEN_SECRET = "ab6WXCsQfYn88YPn4Gq2gXDwPqzd9fWn7tcydNnwNfa9wBdsfxGfyT3mFHfFcnR9"
-
-# --- Telegram Bot Credentials ---
-BOT_TOKEN = "7970729024:AAFIFzpY8-m2OLY07chzcYWJevgXXcTbZUs"
-CHAT_ID = "7108900627"
+TT_API_BASE = os.getenv("FXOPEN_API_BASE", "https://ttdemowebapi.fxopen.net:8443")
+TOKEN_ID = os.getenv("FXOPEN_TOKEN_ID")
+TOKEN_SECRET = os.getenv("FXOPEN_TOKEN_SECRET")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 def hmac_headers(method, endpoint, body=""):
@@ -41,16 +38,24 @@ def place_market_order(symbol="EURUSD", volume=10000, side="Buy"):
     }
     headers = hmac_headers("POST", endpoint, json.dumps(order))
     response = requests.post(url, headers=headers, json=order)
+
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
+
+    print(f"DEBUG: HTTP {response.status_code} - {response.text}")
+
     if response.status_code == 200:
         result = response.json()
-        return f"✅ Trade executed:\n{symbol} {side} {volume}\nOrder ID: {result.get('ID')}"
+        trade_id = result.get("ID", "N/A")
+        return (
+            f"✅ Trade Executed\n"
+            f"📈 Symbol: {symbol}\n"
+            f"🧾 Side: {side}\n"
+            f"📊 Volume: {volume}\n"
+            f"🆔 Order ID: {trade_id}\n"
+            f"⏰ Time: {timestamp} UTC"
+        )
     else:
         return f"❌ Trade failed:\n{response.text}"
-
-def handle_command(text):
-    if text.lower().strip() == "/maketrade":
-        return place_market_order()
-    return "Unrecognized command."
 
 def start_polling():
     print("🤖 Polling started.")
@@ -64,12 +69,17 @@ def start_polling():
                 message = update.get("message", {})
                 chat_id = str(message.get("chat", {}).get("id", ""))
                 text = message.get("text", "")
-                if chat_id == CHAT_ID:
-                    reply = handle_command(text)
-                    send_telegram(reply)
+                print(f"📩 Message from chat_id={chat_id}: {text}")
+                if chat_id == str(CHAT_ID) and text.lower().strip() == "/maketrade":
+                    result = place_market_order()
+                    send_telegram(result)
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"❌ Error: {e}")
         time.sleep(2)
 
 if __name__ == "__main__":
+    for var in ["BOT_TOKEN", "CHAT_ID", "FXOPEN_TOKEN_ID", "FXOPEN_TOKEN_SECRET", "FXOPEN_API_BASE"]:
+        if not os.getenv(var):
+            print(f"❌ Missing env var: {var}")
+            exit(1)
     start_polling()
