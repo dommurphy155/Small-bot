@@ -12,6 +12,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+error_log = []
+
 def hmac_headers(method, endpoint, body=""):
     timestamp = str(int(time.time() * 1000))
     msg = f"{timestamp}{method.upper()}{endpoint}{body}"
@@ -30,12 +32,7 @@ def send_telegram(text):
 def place_market_order(symbol="EURUSD", volume=10000, side="Buy"):
     endpoint = "/api/v2/Trade/MarketOrder"
     url = TT_API_BASE + endpoint
-    order = {
-        "Symbol": symbol,
-        "Volume": volume,
-        "Side": side,
-        "Comment": "TelegramBotTrade"
-    }
+    order = {"Symbol": symbol, "Volume": volume, "Side": side, "Comment": "TelegramBotTrade"}
     headers = hmac_headers("POST", endpoint, json.dumps(order))
     response = requests.post(url, headers=headers, json=order)
 
@@ -53,7 +50,12 @@ def place_market_order(symbol="EURUSD", volume=10000, side="Buy"):
             f"⏰ Time: {timestamp} UTC"
         )
     else:
-        return f"❌ Trade failed:\n{response.text}"
+        error_msg = f"❌ Trade failed:\n{response.text}"
+        error_log.append(error_msg)
+        # Keep only last 20 errors
+        if len(error_log) > 20:
+            error_log.pop(0)
+        return error_msg
 
 def start_polling():
     print("🤖 Polling started.")
@@ -68,11 +70,21 @@ def start_polling():
                 chat_id = str(message.get("chat", {}).get("id", ""))
                 text = message.get("text", "")
                 print(f"📩 Message from chat_id={chat_id}: {text}")
-                if chat_id == str(CHAT_ID) and text.lower().strip() == "/maketrade":
-                    result = place_market_order()
-                    send_telegram(result)
+                if chat_id == str(CHAT_ID):
+                    if text.lower().strip() == "/maketrade":
+                        result = place_market_order()
+                        send_telegram(result)
+                    elif text.lower().strip() == "/errors":
+                        if error_log:
+                            send_telegram("Last 20 errors:\n" + "\n".join(error_log))
+                        else:
+                            send_telegram("No errors logged.")
         except Exception as e:
-            print(f"❌ Error: {e}")
+            err = f"❌ Exception: {e}"
+            print(err)
+            error_log.append(err)
+            if len(error_log) > 20:
+                error_log.pop(0)
         time.sleep(2)
 
 if __name__ == "__main__":
