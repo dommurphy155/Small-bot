@@ -41,8 +41,6 @@ def place_market_order(symbol="EURUSD", volume=10000, side="Buy"):
 
     timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
 
-    print(f"DEBUG: HTTP {response.status_code} - {response.text}")
-
     if response.status_code == 200:
         result = response.json()
         trade_id = result.get("ID", "N/A")
